@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  Enables login persistence for the Douyin sidebar by patching DSH's app.asar.
+  EXPERIMENTAL: read-only check only. Installation and restore are disabled.
 
 .DESCRIPTION
   DeepSeek Harness gives every sidebar webview a throwaway Electron session, so the
@@ -34,8 +34,6 @@
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File patch\install.ps1 -CheckOnly
 
-.EXAMPLE
-  powershell -ExecutionPolicy Bypass -File patch\install.ps1
 #>
 [CmdletBinding()]
 param(
@@ -53,7 +51,7 @@ function Fail([string]$Message) {
   exit 1
 }
 
-if ($Restore) { Fail 'automatic restore disabled: backups cannot be reliably bound to the current archive; no files were changed' }
+if (-not $CheckOnly -or $Restore) { Fail 'experimental public source: installation and restore are disabled; no files were changed' }
 
 function Info([string]$Message) { Write-Host $Message }
 function Step([string]$Message) { Write-Host "==> $Message" -ForegroundColor Cyan }

@@ -172,7 +172,7 @@ function main(argv) {
           console.log('\nread-only preview; re-run with --apply to modify the archive');
           return 0;
         }
-        return apply(asarPath);
+        throw new PatchError('experimental public source: write operations are disabled; no files were changed');
       case 'restore':
         return restore();
       default:
