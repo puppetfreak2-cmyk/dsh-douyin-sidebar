@@ -24,14 +24,16 @@
    ```
    dsh plugin --profile <你的 profile 名> add github:puppetfreak2-cmyk/dsh-douyin-sidebar
    ```
-2. 打持久化补丁。**先完全退出 DSH**，然后在装好的插件目录里运行脚本：
+2. 打持久化补丁。**先完全退出 DSH**，然后进入刚装好的插件目录，运行里面的脚本：
+
    ```
-   cd $env:DSH_HOME\profiles\<你的 profile 名>\node_modules\dsh-douyin-sidebar
+   cd <DSH 的 profile 目录>\profiles\<你的 profile 名>\node_modules\dsh-douyin-sidebar
    powershell -ExecutionPolicy Bypass -File patch\install.ps1
    ```
-   脚本会自己找到 DSH、必要时请求管理员权限、备份原归档、打补丁、再回读校验。完成后从普通桌面重新打开 DSH。
 
-   装好之后，也可以直接对这份插件副本跑只读检查：`powershell -ExecutionPolicy Bypass -File patch\install.ps1 -CheckOnly`。
+   profile 目录默认在 `%USERPROFILE%\.dsh`；如果你设过 `DSH_HOME` 环境变量，就在那个目录下（例如 `echo $env:DSH_HOME`）。
+
+   脚本会自己找到 DSH、必要时请求管理员权限、备份原归档、打补丁、再回读校验。完成后从普通桌面重新打开 DSH。
 
 想先确认兼容性、不改任何东西：`powershell -ExecutionPolicy Bypass -File patch\install.ps1 -CheckOnly`。
 
