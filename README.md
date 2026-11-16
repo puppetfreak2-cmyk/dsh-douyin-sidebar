@@ -7,6 +7,7 @@
 - 已在一台 Windows 机器、DSH 0.2.2-rc.1 构建上完成真实安装验证，含三步：把官方原版归档换回、用本补丁重新打一遍、全档完整性校验；打出的归档 SHA-256 为 `844CABA6…D0CAF`，20519 个打包条目全部通过，重复执行返回「already patched」。
 - 已在该机构建上完成**从零登录**验证：清空插件的会话目录后重新扫码登录，然后完全退出 DSH 再启动。退出期间直接读库确认 57 个抖音 Cookie（含 `sessionid`、`sid_tt`、`uid_tt`）已落盘，重启前后该库哈希完全一致，面板仍为登录态。
 - **这些结果只证明该构建 + 该机器可用，不证明其他机器或后续版本可用。**补丁精确绑定了一份已知的 `lib/main.js` 内容哈希，构建内容不同会被直接拒绝而不是强行修改。
+- 已用 README 里那条安装命令（`dsh plugin --profile … add github:puppetfreak2-cmyk/dsh-douyin-sidebar`）在全新临时 profile 里装过一次：pnpm 从 GitHub 拉下 tarball，装进 `node_modules\dsh-douyin-sidebar`，`lib\`、`patch\` 与根文件齐全；随后直接对这份**装进去的** `patch\install.ps1` 跑 `-CheckOnly`、打补丁、撤销，三步都正常（撤销后归档回到原版哈希）。
 - 尚未在另一台干净 Windows 机器上做过同样的验证。
 
 ## 支持范围与功能
@@ -23,11 +24,14 @@
    ```
    dsh plugin --profile <你的 profile 名> add github:puppetfreak2-cmyk/dsh-douyin-sidebar
    ```
-2. 打持久化补丁。**先完全退出 DSH**，然后：
+2. 打持久化补丁。**先完全退出 DSH**，然后在装好的插件目录里运行脚本：
    ```
+   cd $env:DSH_HOME\profiles\<你的 profile 名>\node_modules\dsh-douyin-sidebar
    powershell -ExecutionPolicy Bypass -File patch\install.ps1
    ```
    脚本会自己找到 DSH、必要时请求管理员权限、备份原归档、打补丁、再回读校验。完成后从普通桌面重新打开 DSH。
+
+   装好之后，也可以直接对这份插件副本跑只读检查：`powershell -ExecutionPolicy Bypass -File patch\install.ps1 -CheckOnly`。
 
 想先确认兼容性、不改任何东西：`powershell -ExecutionPolicy Bypass -File patch\install.ps1 -CheckOnly`。
 
