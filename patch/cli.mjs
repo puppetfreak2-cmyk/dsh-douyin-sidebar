@@ -9,19 +9,20 @@
 // Safety model
 //  * `check` only reads.
 //  * `apply`/`restore` do nothing without the literal `--apply` flag.
-//  * Writing requires the file to be unlocked, which in practice means DSH is not
-//    running.  A locked file fails loudly instead of half-patching.
-//  * A timestamped backup sits next to the original before anything is replaced.
-//  * The replacement is written to a temporary file in the same directory and then
-//    moved over the original, so an interrupted write cannot leave a torn archive.
-//  * The result is re-verified in memory (entry digest + full header sweep) before
-//    the move; on any failure the original file is left untouched.
+//  * The original and replacement are checked, backup and temporary file are read
+//    back, and the target is compared again immediately before rename. The installed
+//    bytes are read back and checked after rename. These checks are not a lock or an
+//    atomic compare-and-replace; another process can still race the final comparison.
+//  * A failure after replacement may leave a changed archive; there is no auto-rollback.
+//  * `restore` binds a backup to the installed archive by result: re-running the
+//    deterministic patch on the backup must reproduce the installed bytes exactly.
 import { createHash } from 'node:crypto';
 import {
   closeSync,
   existsSync,
   openSync,
   readFileSync,
+  readdirSync,
   renameSync,
   statSync,
   unlinkSync,
@@ -29,6 +30,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
 import { sweepArchive } from './asar.mjs';
 import { PatchError, TARGET_ENTRY, planPatch } from './patcher.mjs';
@@ -54,9 +56,8 @@ function parseArgs(argv) {
   return options;
 }
 
-// A writable handle is the only reliable "not in use" probe on Windows: the running
-// app holds app.asar open.  A read-only success proves nothing, so both are tried.
-function assertUnlocked(file) {
+// This is only a permission/in-use probe, not a lock and not proof the app is closed.
+function assertWritable(file) {
   let handle;
   try {
     handle = openSync(file, 'r+');
@@ -77,18 +78,37 @@ function timestamp() {
   return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
 }
 
-function atomicReplace(file, bytes) {
+// Hooks are for deterministic offline simulation; the CLI never supplies them.
+export function replaceVerified(file, original, replacement, backup, hooks = {}) {
   const temporary = join(dirname(file), `.${basename(file)}.${process.pid}.tmp`);
+  let tempCreated = false;
+  let replaced = false;
   try {
-    writeFileSync(temporary, bytes, { mode: statSync(file).mode });
+    const mode = statSync(file).mode;
+    writeFileSync(backup, original, { mode, flag: 'wx' });
+    hooks.afterBackup?.({ file, backup, temporary });
+    if (!readFileSync(backup).equals(original)) throw new Error('backup readback differs from original');
+    const fd = openSync(temporary, 'wx', mode);
+    tempCreated = true;
+    try { writeFileSync(fd, replacement); } finally { closeSync(fd); }
+    hooks.afterTemporary?.({ file, backup, temporary });
+    const staged = readFileSync(temporary);
+    if (!staged.equals(replacement) || sweepArchive(staged).failures.length) throw new Error('temporary archive verification failed');
+    hooks.beforeCompare?.({ file, backup, temporary });
+    if (!readFileSync(file).equals(original)) throw new Error('target changed since it was read; refusing replacement');
+    hooks.afterCompare?.({ file, backup, temporary });
     renameSync(temporary, file);
+    tempCreated = false;
+    replaced = true;
+    hooks.afterRename?.({ file, backup, temporary });
+    const installed = readFileSync(file);
+    if (!installed.equals(replacement) || sweepArchive(installed).failures.length) throw new Error('installed archive verification failed');
   } catch (error) {
-    try {
-      if (existsSync(temporary)) unlinkSync(temporary);
-    } catch {
-      /* best effort */
+    throw new PatchError(`replacement failed ${replaced ? 'after rename; the archive may already be changed' : 'before rename; target was not replaced by this process'}; backup may exist at ${backup}: ${error?.message ?? error}`);
+  } finally {
+    if (tempCreated) {
+      try { unlinkSync(temporary); } catch { /* best effort */ }
     }
-    throw new PatchError(`failed to replace ${file}: ${error?.message ?? error}`);
   }
 }
 
@@ -132,12 +152,10 @@ function apply(asarPath) {
   if (verification.failures.length !== 0) {
     throw new PatchError(`patched archive failed verification: ${verification.failures.slice(0, 3).join('; ')}`);
   }
-  assertUnlocked(asarPath);
+  assertWritable(asarPath);
   const backup = `${asarPath}.bak-${timestamp()}`;
-  if (existsSync(backup)) throw new PatchError(`backup already exists: ${backup}`);
-  writeFileSync(backup, asar, { mode: statSync(asarPath).mode });
-  console.log(`backup         : ${backup}`);
-  atomicReplace(asarPath, planned.asar);
+  replaceVerified(asarPath, asar, planned.asar, backup);
+  console.log(`backup         : ${backup} (read back and compared)`);
   console.log(`patched        : ${asarPath}`);
   console.log(`changed bytes  : ${planned.changedBytes} in ${TARGET_ENTRY}`);
   console.log(`new header     : ${verification.headerHash}`);
@@ -145,8 +163,74 @@ function apply(asarPath) {
   return 0;
 }
 
-function restore() {
-  throw new PatchError('automatic restore disabled: backups cannot be reliably bound to the current archive; no files were changed');
+function restore(asarPath) {
+  const current = readFileSync(asarPath);
+
+  // Restore is only meaningful on a patched archive.  planPatch is deterministic,
+  // so "still patchable" means "not patched".
+  if (planPatch(current) !== null) {
+    throw new PatchError(`restore: ${asarPath} is not patched by this tool; nothing to restore`);
+  }
+
+  // A backup is bound to the installed archive by result, not by name or date:
+  // re-running the deterministic patch on the backup must reproduce the exact
+  // bytes that are installed right now.  A stale or foreign backup cannot pass.
+  const dir = dirname(asarPath);
+  const prefix = `${basename(asarPath)}.bak-`;
+  const candidates = readdirSync(dir)
+    .filter((name) => name.startsWith(prefix))
+    .sort()
+    .reverse();
+
+  const bound = [];
+  for (const name of candidates) {
+    const path = join(dir, name);
+    let bytes;
+    try {
+      bytes = readFileSync(path);
+    } catch {
+      continue;
+    }
+    if (!bytes.length) continue;
+    let planned = null;
+    try {
+      planned = planPatch(bytes);
+    } catch {
+      continue;
+    }
+    if (planned === null) continue; // already patched, cannot be the pre-image
+    if (!planned.asar.equals(current)) continue;
+    bound.push({ name, path, bytes });
+  }
+
+  if (bound.length === 0) {
+    throw new PatchError(
+      `restore: no backup in ${dir} reproduces the installed archive byte for byte; ` +
+        'refusing to guess which backup belongs here (no files were changed)',
+    );
+  }
+
+  const chosen = bound[0];
+  const sweep = sweepArchive(chosen.bytes);
+  if (sweep.failures.length) {
+    throw new PatchError(`restore: backup ${chosen.name} failed integrity verification: ${sweep.failures.slice(0, 3).join('; ')}`);
+  }
+
+  console.log(`backup to use  : ${chosen.name}`);
+  console.log(`  verified     : re-patching it reproduces the installed archive exactly`);
+  console.log(`  header sha256: ${sweep.headerHash}`);
+  console.log(`  entries      : ${sweep.checked} (unpacked ${sweep.unpacked}, links ${sweep.links})`);
+  if (bound.length > 1) {
+    console.log(`  note         : ${bound.length} backups match; using the newest`);
+  }
+  console.log(`restoring      : ${asarPath}`);
+
+  assertWritable(asarPath);
+  const safety = `${asarPath}.bak-${timestamp()}`;
+  replaceVerified(asarPath, current, chosen.bytes, safety);
+  console.log(`kept a copy of the patched archive at: ${safety}`);
+  console.log('Restore DeepSeek Harness: the persistent sidebar session will no longer be used.');
+  return 0;
 }
 
 function main(argv) {
@@ -172,9 +256,13 @@ function main(argv) {
           console.log('\nread-only preview; re-run with --apply to modify the archive');
           return 0;
         }
-        throw new PatchError('experimental public source: write operations are disabled; no files were changed');
+        return apply(asarPath);
       case 'restore':
-        return restore();
+        if (!options.apply) {
+          console.log('restore is a write operation; re-run with --apply to restore the archive');
+          return 0;
+        }
+        return restore(asarPath);
       default:
         throw new PatchError(`unknown command: ${options.command}\n${USAGE}`);
     }
@@ -188,4 +276,6 @@ function main(argv) {
   }
 }
 
-process.exitCode = main(process.argv.slice(2));
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exitCode = main(process.argv.slice(2));
+}

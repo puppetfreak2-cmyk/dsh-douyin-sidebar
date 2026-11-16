@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  EXPERIMENTAL: read-only check only. Installation and restore are disabled.
+  Enables login persistence for the Douyin sidebar by patching DSH's app.asar.
 
 .DESCRIPTION
   DeepSeek Harness gives every sidebar webview a throwaway Electron session, so the
@@ -8,12 +8,12 @@
   the installed DSH desktop application:
 
     1. locates DeepSeek Harness.exe and its resources\app.asar
-    2. refuses to run while DSH is open (the archive is locked, and patching a
-       running app would only take effect after a restart anyway)
+    2. checks for a running DSH process and refuses if one is detected; this check
+       cannot prevent another process from starting or changing the archive
     3. re-launches itself elevated, because app.asar lives under Program Files
     4. runs patch\cli.mjs, which verifies the archive, writes a timestamped backup,
        patches, and re-verifies the result
-    5. optionally starts DSH again
+    5. never starts DSH automatically; prompts for a manual non-administrator start
 
   Nothing is downloaded.  Re-running is safe: an already patched archive is
   reported and left alone.
@@ -22,18 +22,22 @@
   Path to "DeepSeek Harness.exe".  Auto-detected when omitted.
 
 .PARAMETER NoRelaunch
-  Do not start DSH again after patching.
+  Suppress the reminder to start DSH manually after patching. The script never
+  starts DSH automatically, regardless of this switch.
 
 .PARAMETER CheckOnly
   Read-only: report archive state and whether the patch would apply.  Runs without
   elevation and with DSH open.
 
 .PARAMETER Restore
-  Disabled: backups cannot be reliably bound to the current archive.
+  Undo the patch.  Only a backup whose re-patched bytes equal the installed
+  archive exactly is accepted, so a stale or foreign backup cannot be used.
 
 .EXAMPLE
   powershell -ExecutionPolicy Bypass -File patch\install.ps1 -CheckOnly
 
+.EXAMPLE
+  powershell -ExecutionPolicy Bypass -File patch\install.ps1
 #>
 [CmdletBinding()]
 param(
@@ -51,7 +55,7 @@ function Fail([string]$Message) {
   exit 1
 }
 
-if (-not $CheckOnly -or $Restore) { Fail 'experimental public source: installation and restore are disabled; no files were changed' }
+if ($Restore) { Fail 'automatic restore disabled: backups cannot be reliably bound to the current archive; no files were changed' }
 
 function Info([string]$Message) { Write-Host $Message }
 function Step([string]$Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
@@ -139,8 +143,8 @@ if ($locked) {
   $ids = ($locked | Select-Object -ExpandProperty Id) -join ', '
   Info ""
   Info "This DeepSeek Harness is still running (process ids: $ids)."
-  Info "Close it completely first - the archive is locked while the app is open,"
-  Info "and a running app would keep using the old code anyway."
+  Info "Close it completely first; a running app may keep using the old code."
+  Info "The process check is not a lock; prevent other processes from changing the archive."
   Info ""
   Info "Then run this script again."
   exit 2
@@ -160,7 +164,8 @@ function Test-Writable([string]$Path) {
   }
 }
 
-$needsElevation = (-not (Test-Administrator)) -and (-not (Test-Writable $asar))
+$isAdministrator = Test-Administrator
+$needsElevation = (-not $isAdministrator) -and (-not (Test-Writable $asar))
 if ($needsElevation) {
   Step 'requesting administrator rights'
   $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"", '-DshExe', "`"$exe`"")
@@ -171,28 +176,39 @@ if ($needsElevation) {
   } catch {
     Fail "administrator rights are required to write $asar (request was cancelled or refused)"
   }
+  if ($null -eq $elevated -or $null -eq $elevated.ExitCode) {
+    Fail 'administrator process did not provide an exit code; patch outcome is unknown, inspect the archive before further action'
+  }
+  if ($elevated.ExitCode -eq 0 -and -not $NoRelaunch) {
+    Info 'Start DeepSeek Harness manually from a non-administrator context.'
+  }
   exit $elevated.ExitCode
 }
 
 # ---------------------------------------------------------------- patch or restore
 if ($Restore) {
-  Step 'restoring the newest backup'
+  Step 'restoring a backup that matches this archive exactly'
   & $node $cli restore --asar $asar --apply
-  if ($LASTEXITCODE -ne 0) { Fail 'restore failed; the archive was left untouched' }
+  if ($LASTEXITCODE -ne 0) { Fail 'restore failed; inspect the archive and any backups before further action' }
 } else {
   Step 'applying the persistence patch'
   & $node $cli apply --asar $asar --apply
-  if ($LASTEXITCODE -ne 0) { Fail 'patch failed; the archive was left untouched (a backup may exist next to it)' }
+  if ($LASTEXITCODE -ne 0) {
+    $patchExitCode = $LASTEXITCODE
+    Info 'ERROR: patch failed; the archive may already have changed and a backup may exist. Inspect both before further action.'
+    exit $patchExitCode
+  }
 }
 
+# Never launch DSH here: even non-admin accounts may hold elevated tokens.
+# A manual start from the ordinary desktop avoids inheriting this process's token.
 if (-not $NoRelaunch) {
-  Step 'starting DeepSeek Harness'
-  Start-Process -FilePath $exe | Out-Null
+  Info 'Automatic restart is disabled. Start DeepSeek Harness manually from a non-administrator context.'
 }
 
 Info ""
 if ($Restore) {
   Info "Done. The original archive is back in place."
 } else {
-  Info "Done. Open the Douyin panel once and sign in; the login now survives a restart."
+  Info "Patch step completed. Open the Douyin panel and sign in; persistence after restart depends on the environment and is not guaranteed."
 }

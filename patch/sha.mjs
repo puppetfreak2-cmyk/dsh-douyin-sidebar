@@ -9,22 +9,12 @@
 // entry checks, always in a small entry.  Re-hashing the very same bytes
 // immediately afterwards always agreed with the stored hash, and hammering one
 // entry 20,000 times in a vacuum never disagreed.  A 256 MB memory-integrity
-// test (write pattern, re-read, compare) was clean, so the bytes are not
-// decaying; the disagreement is in the native hashing path when many distinct
-// buffers are hashed back to back.
-//
-// Electron itself validates the archive with Chromium's BoringSSL, not with
-// Node's crypto, so this quirk does not make a patched archive unlaunchable.
-// It does make a native-only verifier unreliable in both directions: it can
-// refuse a healthy archive (harmless but confusing) or, if the check is skipped,
-// accept a damaged one.  So:
-//   * `pureSha256` is a dependency-free FIPS 180-4 implementation that never
-//     touches native crypto, and is self-tested against published vectors;
-//   * `digestOf` uses native when it reproduces itself and pure JS when it does not;
-//   * `matchesDigest` accepts a match from either implementation, and only reports
-//     a mismatch after native twice *and* pure JS have all disagreed.
-// Net effect: a flaky native digest can no longer fail a healthy archive, and a
-// real corruption is still caught — by a code path that never showed the flakiness.
+// test (write pattern, re-read, compare) was clean. These observations do not
+// establish the cause, rule out memory faults, or establish whether Electron is
+// affected. Independent investigation and real-environment testing remain needed.
+// `digestOf` repeats native hashing and falls back to pure JS on disagreement;
+// `matchesDigest` accepts a match from either implementation. These heuristics
+// cannot guarantee detection of corruption or rule out false results.
 import { createHash } from 'node:crypto';
 
 const K = new Uint32Array([
@@ -118,7 +108,8 @@ export function pureSha256(bytes) {
 export const nativeSha256 = (data) => createHash('sha256').update(data).digest('hex');
 
 /**
- * Authoritative digest: native when it reproduces itself, pure JS when it does not.
+ * Digest heuristic: native when it reproduces itself, pure JS when it does not.
+ * Repeated agreement does not prove correctness.
  *
  * @param {Buffer} data
  * @returns {string} lowercase hex digest
@@ -132,10 +123,8 @@ export function digestOf(data) {
 /**
  * Does this data match a recorded digest?
  *
- * Native first (fast, correct in ~all cases).  Only when native disagrees does the
- * pure-JS implementation get a vote — twice-native-says-no is precisely the
- * situation where native has been observed to lie, so a mismatch is confirmed in
- * JavaScript before being reported.
+ * Native first; only when both native attempts disagree with the expected value
+ * is the pure-JS implementation consulted. A match is not proof of integrity.
  *
  * @param {Buffer} data
  * @param {string} expected lowercase hex digest
@@ -147,7 +136,7 @@ export function matchesDigest(data, expected) {
   return pureSha256(data) === expected;
 }
 
-/** Known-answer test vectors, used by the test suite and by `check`. */
+/** Known-answer test vectors, used by the test suite. */
 export const SHA256_VECTORS = [
   ['', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'],
   ['abc', 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'],
