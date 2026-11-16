@@ -55,7 +55,6 @@ function Fail([string]$Message) {
   exit 1
 }
 
-if ($Restore) { Fail 'automatic restore disabled: backups cannot be reliably bound to the current archive; no files were changed' }
 
 function Info([string]$Message) { Write-Host $Message }
 function Step([string]$Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
