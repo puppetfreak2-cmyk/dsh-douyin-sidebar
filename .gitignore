@@ -1,0 +1,23 @@
+# 本地运行数据、诊断信息及凭据不进入仓库
+node_modules/
+*.log
+*.bak
+*.bak-*
+*.tmp
+.env
+.env.*
+browser/
+profile/
+profiles/
+credentials/
+Cookies
+Cookies-journal
+Local State
+Preferences
+*.dsh-prototype-journal.json
+
+# 打包与测试产物
+build/
+dist/
+*.tgz
+*.asar
